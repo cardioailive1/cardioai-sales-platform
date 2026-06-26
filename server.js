@@ -661,6 +661,24 @@ app.get('*', (req, res) => {
 // ── Start ─────────────────────────────────────────────────
 async function startServer() {
   try {
+    // Debug path info
+    const publicPath = path.join(__dirname, 'public');
+    const loginPath = path.join(__dirname, 'public', 'login.html');
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    console.log('\n📁 Path debug:');
+    console.log('   __dirname:  ', __dirname);
+    console.log('   public dir: ', publicPath);
+    console.log('   login.html: ', fs.existsSync(loginPath) ? '✅ found' : '❌ NOT FOUND');
+    console.log('   index.html: ', fs.existsSync(indexPath) ? '✅ found' : '❌ NOT FOUND');
+
+    // List public directory contents
+    try {
+      const files = fs.readdirSync(publicPath);
+      console.log('   public contents:', files);
+    } catch(e) {
+      console.log('   public dir does not exist!', e.message);
+    }
+
     await db.initDB();
     app.listen(PORT, () => {
       console.log(`\n🚀 Cardio AI Sales Engine running on port ${PORT}`);
