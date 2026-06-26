@@ -2052,7 +2052,6 @@ app.post('/api/apollo/search', async (req, res) => {
 
   try {
     const payload = {
-      api_key: apiKey,
       person_titles: titles || ['Cardiologist', 'Chief Medical Officer', 'CFO', 'Hospitalist'],
       organization_num_employees_ranges: [`${empMin||200},${empMax||2000}`],
       person_locations: [location || 'United States'],
@@ -2063,7 +2062,11 @@ app.post('/api/apollo/search', async (req, res) => {
 
     const response = await fetch('https://api.apollo.io/v1/mixed_people/search', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'X-Api-Key': apiKey
+      },
       body: JSON.stringify(payload)
     });
 
