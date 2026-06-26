@@ -33,7 +33,6 @@
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
-const FileStore = require('session-file-store')(session);
 const crypto = require('crypto');
 
 const cors = require('cors');
@@ -1626,34 +1625,21 @@ const aiLimiter = rateLimit({
 app.use('/api/', apiLimiter);
 app.use('/api/ai/', aiLimiter);
 // ── Session middleware ───────────────────────────────────
-const SESSION_DIR = process.env.NODE_ENV === 'production' ? '/tmp/sessions' : './sessions';
-
-// Ensure session directory exists
-try {
-  if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
-} catch(e) {
-  console.log('⚠️ Could not create session dir:', e.message);
-}
-
-// Trust Render's proxy for secure cookies
+// Trust Render's proxy
 app.set('trust proxy', 1);
 
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(64).toString('hex');
+
 app.use(session({
-  store: new FileStore({
-    path: SESSION_DIR,
-    ttl: 86400,
-    retries: 1,
-    logFn: () => {}
-  }),
-  secret: process.env.SESSION_SECRET || crypto.randomBytes(64).toString('hex'),
-  resave: false,
+  secret: SESSION_SECRET,
+  resave: true,
   saveUninitialized: false,
   name: 'cardioai.sid',
   cookie: {
     secure: false,
-    httpOnly: true,
-    sameSite: 'lax',
-    maxAge: 24 * 60 * 60 * 1000
+    httpOnly: false,
+    sameSite: false,
+    maxAge: 7 * 24 * 60 * 60 * 1000
   }
 }));
 
@@ -1760,9 +1746,14 @@ app.get('/api/auth/callback', async (req, res) => {
     }
 
     req.session.user = { email, name, picture, signedInAt: new Date().toISOString() };
-    console.log(`✅ User signed in: ${email}`);
+    req.session.authenticated = true;
+    console.log(`✅ User signed in: ${email} | sessionID: ${req.sessionID}`);
     req.session.save((err) => {
-      if (err) console.error('Session save error:', err);
+      if (err) {
+        console.error('❌ Session save error:', err);
+        return res.redirect('/login?error=session_error');
+      }
+      console.log(`✅ Session saved for: ${email}`);
       res.redirect('/');
     });
   } catch(e) {
@@ -1772,6 +1763,7 @@ app.get('/api/auth/callback', async (req, res) => {
 });
 
 app.get('/api/auth/me', (req, res) => {
+  console.log(`/api/auth/me | sessionID: ${req.sessionID} | user: ${req.session?.user?.email || 'none'}`);
   if (!req.session?.user) return res.status(401).json({ error: 'Not signed in' });
   res.json({ user: req.session.user });
 });
