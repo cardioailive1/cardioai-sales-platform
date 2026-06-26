@@ -33,6 +33,7 @@
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
+const FileStore = require('session-file-store')(session);
 const crypto = require('crypto');
 
 const cors = require('cors');
@@ -46,6 +47,7 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const db = require('./db');
 
 // ── Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -54,7 +56,6 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
 
 // Rate limiting
 const apiLimiter = rateLimit({
@@ -70,13 +71,30 @@ const aiLimiter = rateLimit({
 app.use('/api/', apiLimiter);
 app.use('/api/ai/', aiLimiter);
 // ── Session middleware ───────────────────────────────────
+const SESSION_DIR = process.env.NODE_ENV === 'production' ? '/tmp/sessions' : './sessions';
+
+// Ensure session directory exists
+try {
+  if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+} catch(e) {
+  console.log('⚠️ Could not create session dir:', e.message);
+}
+
 app.use(session({
+  store: new FileStore({
+    path: SESSION_DIR,
+    ttl: 86400, // 24 hours
+    retries: 1,
+    logFn: () => {} // suppress verbose logs
+  }),
   secret: process.env.SESSION_SECRET || crypto.randomBytes(64).toString('hex'),
   resave: false,
   saveUninitialized: false,
+  name: 'cardioai.sid',
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
@@ -86,11 +104,23 @@ const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || 'cardioailive.com';
 const ALLOWED_EMAILS = process.env.ALLOWED_EMAILS ? process.env.ALLOWED_EMAILS.split(',').map(e=>e.trim()) : [];
 
 function requireAuth(req, res, next) {
-  if (req.session?.user) return next();
-  if (req.path.startsWith('/api/auth') || req.path === '/api/health') return next();
-  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized. Please sign in.' });
-  // Serve login page for all other routes
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  // Always allow: auth routes, health check, login page, static assets
+  if (req.path.startsWith('/api/auth')) return next();
+  if (req.path === '/api/health') return next();
+  if (req.path === '/login.html') return next();
+  if (req.path.match(/\.(css|js|ico|png|jpg|svg|woff|woff2)$/)) return next();
+
+  // Block unauthenticated API calls
+  if (req.path.startsWith('/api/')) {
+    if (!req.session?.user) return res.status(401).json({ error: 'Unauthorized. Please sign in.' });
+    return next();
+  }
+
+  // For all page routes — check auth
+  if (!req.session?.user) {
+    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  }
+  next();
 }
 
 function isAllowedUser(email) {
@@ -103,6 +133,9 @@ function isAllowedUser(email) {
 
 app.use(requireAuth);
 
+// ── Static files (served after auth check) ───────────────
+app.use(express.static(path.join(__dirname, 'public')));
+
 
 // ── Clients ─────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -113,35 +146,7 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI
 );
 
-// ── In-memory store (replace with DB in production) ─────
-let store = {
-  leads: [],
-  waitlist: [],
-  milestones: [],
-  revenue: [],
-  sequences: [],
-  sendLog: [],
-  counters: { leads: 1, waitlist: 1, milestones: 1, revenue: 1, sequences: 1 }
-};
-
-// Load persisted data if exists
-const DATA_FILE = path.join(__dirname, 'data.json');
-if (fs.existsSync(DATA_FILE)) {
-  try {
-    store = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    console.log('✅ Loaded persisted data');
-  } catch(e) {
-    console.log('⚠️ Could not load data.json, starting fresh');
-  }
-}
-
-function saveStore() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
-  } catch(e) {
-    console.error('Could not persist data:', e.message);
-  }
-}
+// ── Database via db.js (PostgreSQL or file fallback) ────
 
 // ── Cardio AI system context ─────────────────────────────
 const CARDIO_AI_CONTEXT = `You are the AI sales engine for Cardio AI Corp, founded by Sampson Kontomah.
@@ -223,7 +228,8 @@ app.get('/api/health', (req, res) => {
     services: {
       anthropic: !!process.env.ANTHROPIC_API_KEY,
       gmail: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-      apollo: !!process.env.APOLLO_API_KEY
+      apollo: !!process.env.APOLLO_API_KEY,
+      database: db.USE_PG ? 'postgresql' : 'file'
     }
   });
 });
@@ -233,7 +239,8 @@ app.post('/api/ai/generate', async (req, res) => {
   const { leadId, type, context } = req.body;
   if (!leadId || !type) return res.status(400).json({ error: 'leadId and type required' });
 
-  const lead = store.leads.find(l => l.id === leadId) || store.waitlist.find(w => w.id === leadId);
+  const [allLeads, allWl] = await Promise.all([db.Leads.getAll(), db.Waitlist.getAll()]);
+  const lead = allLeads.find(l => String(l.id) === String(leadId)) || allWl.find(w => String(w.id) === String(leadId));
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
   const typeMap = {
@@ -278,7 +285,8 @@ Sign as: Sampson Kontomah, Founder & CEO, Cardio AI | tonywell@cardioailive.com 
 
 app.post('/api/ai/qualify', async (req, res) => {
   const { leadId, intel } = req.body;
-  const lead = store.leads.find(l => l.id === leadId);
+  const allLeadsQ = await db.Leads.getAll();
+  const lead = allLeadsQ.find(l => String(l.id) === String(leadId));
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
   const prompt = `Perform a detailed BANT qualification for this Cardio AI lead:
@@ -310,7 +318,8 @@ app.post('/api/ai/chat', async (req, res) => {
   const { messages } = req.body;
   if (!messages || !messages.length) return res.status(400).json({ error: 'messages required' });
 
-  const pipelineSummary = `Pipeline: ${store.leads.length} leads. Waitlist: ${store.waitlist.length}. LOIs: ${store.leads.filter(l=>l.stage>=4).length}. Hot: ${store.leads.filter(l=>l.temp==='hot').length}. Emails sent: ${store.sendLog.length}.`;
+  const [chatLeads, chatWl, chatLog] = await Promise.all([db.Leads.getAll(), db.Waitlist.getAll(), db.SendLog.getAll()]);
+  const pipelineSummary = `Pipeline: ${chatLeads.length} leads. Waitlist: ${chatWl.length}. LOIs: ${chatLeads.filter(l=>l.stage>=4).length}. Hot: ${chatLeads.filter(l=>l.temp==='hot').length}. Emails sent: ${chatLog.length}.`;
 
   try {
     const msg = await anthropic.messages.create({
@@ -326,9 +335,10 @@ app.post('/api/ai/chat', async (req, res) => {
 });
 
 app.post('/api/ai/briefing', async (req, res) => {
-  const hot = store.leads.filter(l=>l.temp==='hot').map(l=>`${l.name} (${l.role}, ${['ICP','Lead gen','Outreach','Demo','LOI','Closed'][l.stage]})`).join('; ') || 'none';
-  const demos = store.leads.filter(l=>l.stage===3).map(l=>l.name).join(', ') || 'none';
-  const prompt = `Daily sales briefing for Cardio AI. Hot leads: ${hot}. Demo stage: ${demos}. Total leads: ${store.leads.length}. LOIs: ${store.leads.filter(l=>l.stage>=4).length}. Waitlist: ${store.waitlist.length}. Give: (1) top 3 priorities today, (2) who to follow up with urgently, (3) one strategic insight. Be direct.`;
+  const [bLeads, bWl] = await Promise.all([db.Leads.getAll(), db.Waitlist.getAll()]);
+  const hot = bLeads.filter(l=>l.temp==='hot').map(l=>`${l.name} (${l.role}, ${['ICP','Lead gen','Outreach','Demo','LOI','Closed'][l.stage]})`).join('; ') || 'none';
+  const demos = bLeads.filter(l=>l.stage===3).map(l=>l.name).join(', ') || 'none';
+  const prompt = `Daily sales briefing for Cardio AI. Hot leads: ${hot}. Demo stage: ${demos}. Total leads: ${bLeads.length}. LOIs: ${bLeads.filter(l=>l.stage>=4).length}. Waitlist: ${bWl.length}. Give: (1) top 3 priorities today, (2) who to follow up with urgently, (3) one strategic insight. Be direct.`;
 
   try {
     const msg = await anthropic.messages.create({
@@ -344,10 +354,11 @@ app.post('/api/ai/briefing', async (req, res) => {
 });
 
 app.post('/api/ai/launch', async (req, res) => {
-  const done = store.milestones.filter(m=>m.status==='done').length;
-  const total = store.milestones.length;
-  const rev = store.revenue.reduce((a,r)=>a+r.amount,0);
-  const prompt = `Launch briefing for Cardio AI. Milestones: ${done}/${total} done. Revenue logged: $${rev.toLocaleString()} of $51M Y1 target. Waitlist: ${store.waitlist.length} (${store.waitlist.filter(w=>w.status==='onboarded').length} onboarded). Leads: ${store.leads.length}. Give: (1) launch phase assessment, (2) top 3 critical path items to first revenue, (3) 30/60/90 day priorities, (4) biggest risk to $51M target.`;
+  const [lLeads, lWl, lMs, lRv] = await Promise.all([db.Leads.getAll(), db.Waitlist.getAll(), db.Milestones.getAll(), db.Revenue.getAll()]);
+  const done = lMs.filter(m=>m.status==='done').length;
+  const total = lMs.length;
+  const rev = lRv.reduce((a,r)=>a+r.amount,0);
+  const prompt = `Launch briefing for Cardio AI. Milestones: ${done}/${total} done. Revenue logged: $${rev.toLocaleString()} of $51M Y1 target. Waitlist: ${lWl.length} (${lWl.filter(w=>w.status==='onboarded').length} onboarded). Leads: ${lLeads.length}. Give: (1) launch phase assessment, (2) top 3 critical path items to first revenue, (3) 30/60/90 day priorities, (4) biggest risk to $51M target.`;
 
   try {
     const msg = await anthropic.messages.create({
@@ -452,17 +463,13 @@ app.post('/api/gmail/send', async (req, res) => {
       requestBody: { raw }
     });
 
-    const logEntry = {
+    await db.SendLog.add({
       id: Date.now(),
-      to,
-      subject,
+      to, subject,
       messageId: result.data.id,
       status: 'sent',
-      time: new Date().toISOString()
-    };
-    store.sendLog.unshift(logEntry);
-    if (store.sendLog.length > 500) store.sendLog = store.sendLog.slice(0, 500);
-    saveStore();
+      time: new Date().toLocaleTimeString()
+    });
 
     res.json({ success: true, messageId: result.data.id });
   } catch(e) {
@@ -523,219 +530,150 @@ app.post('/api/apollo/search', async (req, res) => {
 });
 
 // ── Leads CRUD ───────────────────────────────────────────
-app.get('/api/leads', (req, res) => res.json(store.leads));
+app.get('/api/leads', async (req, res) => {
+  try { res.json(await db.Leads.getAll()); } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
-app.post('/api/leads', (req, res) => {
-  const { name, org, role, email, beds, ehr, stage, temp, notes } = req.body;
+app.post('/api/leads', async (req, res) => {
+  const { name, org } = req.body;
   if (!name || !org) return res.status(400).json({ error: 'name and org required' });
-  const lead = {
-    id: store.counters.leads++,
-    name, org, role: role||'Unknown', email: email||'',
-    beds: beds||'', ehr: ehr||'', stage: parseInt(stage)||0,
-    temp: temp||'warm', notes: notes||'',
-    added: new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),
-    createdAt: new Date().toISOString()
-  };
-  store.leads.push(lead);
-  saveStore();
-  res.status(201).json(lead);
+  try { res.status(201).json(await db.Leads.create(req.body)); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/leads/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const idx = store.leads.findIndex(l => l.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Lead not found' });
-  store.leads[idx] = { ...store.leads[idx], ...req.body, id, updatedAt: new Date().toISOString() };
-  saveStore();
-  res.json(store.leads[idx]);
+app.put('/api/leads/:id', async (req, res) => {
+  try {
+    const result = await db.Leads.update(parseInt(req.params.id), req.body);
+    if (!result) return res.status(404).json({ error: 'Lead not found' });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/leads/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  store.leads = store.leads.filter(l => l.id !== id);
-  saveStore();
-  res.json({ success: true });
+app.delete('/api/leads/:id', async (req, res) => {
+  try { await db.Leads.delete(parseInt(req.params.id)); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Waitlist CRUD ────────────────────────────────────────
-app.get('/api/waitlist', (req, res) => res.json(store.waitlist));
+app.get('/api/waitlist', async (req, res) => {
+  try { res.json(await db.Waitlist.getAll()); } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
-app.post('/api/waitlist', (req, res) => {
-  const { name, org, role, email, beds, ehr, persona, priority } = req.body;
+app.post('/api/waitlist', async (req, res) => {
+  const { name, org } = req.body;
   if (!name || !org) return res.status(400).json({ error: 'name and org required' });
-  const entry = {
-    id: 'w' + store.counters.waitlist++,
-    name, org, role: role||'Unknown', email: email||'',
-    beds: beds||'', ehr: ehr||'',
-    persona: persona||'cardiologist',
-    priority: priority||'medium',
-    status: 'not_invited',
-    added: new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),
-    createdAt: new Date().toISOString()
-  };
-  store.waitlist.push(entry);
-  saveStore();
-  res.status(201).json(entry);
+  try { res.status(201).json(await db.Waitlist.create(req.body)); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/waitlist/:id', (req, res) => {
-  const id = req.params.id;
-  const idx = store.waitlist.findIndex(w => w.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Entry not found' });
-  store.waitlist[idx] = { ...store.waitlist[idx], ...req.body, id, updatedAt: new Date().toISOString() };
-  saveStore();
-  res.json(store.waitlist[idx]);
+app.put('/api/waitlist/:id', async (req, res) => {
+  try {
+    const result = await db.Waitlist.update(req.params.id, req.body);
+    if (!result) return res.status(404).json({ error: 'Entry not found' });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/waitlist/:id', (req, res) => {
-  store.waitlist = store.waitlist.filter(w => w.id !== req.params.id);
-  saveStore();
-  res.json({ success: true });
+app.delete('/api/waitlist/:id', async (req, res) => {
+  try { await db.Waitlist.delete(req.params.id); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Milestones CRUD ──────────────────────────────────────
-app.get('/api/milestones', (req, res) => res.json(store.milestones));
-
-app.post('/api/milestones', (req, res) => {
-  const { title, phase, owner, due, category, priority, desc } = req.body;
-  if (!title) return res.status(400).json({ error: 'title required' });
-  const ms = {
-    id: store.counters.milestones++,
-    title, phase: parseInt(phase)||0,
-    owner: owner||'Unassigned',
-    due: due||'', category: category||'product',
-    priority: priority||'medium', desc: desc||'',
-    status: 'pending',
-    added: new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),
-    createdAt: new Date().toISOString()
-  };
-  store.milestones.push(ms);
-  saveStore();
-  res.status(201).json(ms);
+app.get('/api/milestones', async (req, res) => {
+  try { res.json(await db.Milestones.getAll()); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/milestones/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const idx = store.milestones.findIndex(m => m.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Milestone not found' });
-  if (req.body.status === 'done' && store.milestones[idx].status !== 'done') {
-    req.body.completedAt = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
-  }
-  store.milestones[idx] = { ...store.milestones[idx], ...req.body, id };
-  saveStore();
-  res.json(store.milestones[idx]);
+app.post('/api/milestones', async (req, res) => {
+  if (!req.body.title) return res.status(400).json({ error: 'title required' });
+  try { res.status(201).json(await db.Milestones.create(req.body)); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/milestones/:id', (req, res) => {
-  store.milestones = store.milestones.filter(m => m.id !== parseInt(req.params.id));
-  saveStore();
-  res.json({ success: true });
+app.put('/api/milestones/:id', async (req, res) => {
+  try {
+    const result = await db.Milestones.update(parseInt(req.params.id), req.body);
+    if (!result) return res.status(404).json({ error: 'Milestone not found' });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/milestones/:id', async (req, res) => {
+  try { await db.Milestones.delete(parseInt(req.params.id)); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Revenue CRUD ─────────────────────────────────────────
-app.get('/api/revenue', (req, res) => res.json(store.revenue));
+app.get('/api/revenue', async (req, res) => {
+  try { res.json(await db.Revenue.getAll()); } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
-app.post('/api/revenue', (req, res) => {
-  const { customer, amount, type, date, pmpm, members } = req.body;
+app.post('/api/revenue', async (req, res) => {
+  const { customer, amount } = req.body;
   if (!customer || !amount) return res.status(400).json({ error: 'customer and amount required' });
-  const rv = {
-    id: store.counters.revenue++,
-    customer, amount: parseFloat(amount),
-    type: type||'Contract', date: date||new Date().toLocaleDateString(),
-    pmpm: pmpm||'', members: members||'',
-    logged: new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),
-    createdAt: new Date().toISOString()
-  };
-  store.revenue.push(rv);
-  saveStore();
-  res.status(201).json(rv);
+  try { res.status(201).json(await db.Revenue.create(req.body)); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Sequences ────────────────────────────────────────────
-app.get('/api/sequences', (req, res) => res.json(store.sequences));
-
-app.post('/api/sequences/enroll', (req, res) => {
-  const { leadId, seqId } = req.body;
-  if (!leadId || !seqId) return res.status(400).json({ error: 'leadId and seqId required' });
-  if (store.sequences.find(s => s.leadId === leadId && s.status === 'active')) {
-    return res.status(409).json({ error: 'Lead already enrolled in an active sequence' });
-  }
-  const seqNames = { cardiologist:'Cardiologist 5-touch', cmo:'CMO/CFO ROI', payer:'Payer medical director', hospitalist:'Hospitalist MD' };
-  const enrollment = {
-    id: store.counters.sequences++,
-    leadId, seqId, seqName: seqNames[seqId]||seqId,
-    currentTouch: 1, totalTouches: 5,
-    status: 'active',
-    enrolled: new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}),
-    nextSend: 'Sending Touch 1 now',
-    touches: [],
-    createdAt: new Date().toISOString()
-  };
-  store.sequences.push(enrollment);
-  saveStore();
-  res.status(201).json(enrollment);
+app.get('/api/sequences', async (req, res) => {
+  try { res.json(await db.Sequences.getAll()); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/sequences/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const idx = store.sequences.findIndex(s => s.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'Sequence not found' });
-  store.sequences[idx] = { ...store.sequences[idx], ...req.body, id };
-  saveStore();
-  res.json(store.sequences[idx]);
+app.post('/api/sequences/enroll', async (req, res) => {
+  const { leadId, seqId } = req.body;
+  if (!leadId || !seqId) return res.status(400).json({ error: 'leadId and seqId required' });
+  try {
+    const seqNames = { cardiologist:'Cardiologist 5-touch', cmo:'CMO/CFO ROI', payer:'Payer medical director', hospitalist:'Hospitalist MD' };
+    const seq = await db.Sequences.create({ leadId: String(leadId), seqId, seqName: seqNames[seqId]||seqId });
+    res.status(201).json(seq);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/sequences/:id', async (req, res) => {
+  try {
+    const result = await db.Sequences.update(parseInt(req.params.id), req.body);
+    if (!result) return res.status(404).json({ error: 'Sequence not found' });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Send log ─────────────────────────────────────────────
-app.get('/api/log', (req, res) => res.json(store.sendLog));
+app.get('/api/log', async (req, res) => {
+  try { res.json(await db.SendLog.getAll()); } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
-app.delete('/api/log', (req, res) => {
-  store.sendLog = [];
-  saveStore();
-  res.json({ success: true });
+app.delete('/api/log', async (req, res) => {
+  try { await db.SendLog.clear(); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Analytics ────────────────────────────────────────────
-app.get('/api/analytics/summary', (req, res) => {
-  const STAGES = ['ICP targeting','Lead gen','Outreach','Demo','LOI','Closed'];
-  res.json({
-    leads: {
-      total: store.leads.length,
-      byStage: STAGES.map((s,i) => ({ stage: s, count: store.leads.filter(l=>l.stage===i).length })),
-      hot: store.leads.filter(l=>l.temp==='hot').length,
-      warm: store.leads.filter(l=>l.temp==='warm').length,
-      cold: store.leads.filter(l=>l.temp==='cold').length,
-      lois: store.leads.filter(l=>l.stage>=4).length,
-      conversionRate: store.leads.length ? Math.round(store.leads.filter(l=>l.stage>=4).length/store.leads.length*100) : 0
-    },
-    waitlist: {
-      total: store.waitlist.length,
-      notInvited: store.waitlist.filter(w=>w.status==='not_invited').length,
-      invited: store.waitlist.filter(w=>w.status==='invited').length,
-      onboarded: store.waitlist.filter(w=>w.status==='onboarded').length
-    },
-    revenue: {
-      total: store.revenue.reduce((a,r)=>a+r.amount,0),
-      target: 51000000,
-      events: store.revenue.length
-    },
-    sequences: {
-      active: store.sequences.filter(s=>s.status==='active').length,
-      totalTouches: store.sequences.reduce((a,s)=>a+s.touches.length,0)
-    },
-    emails: { sent: store.sendLog.length }
-  });
+app.get('/api/analytics/summary', async (req, res) => {
+  try { res.json(await db.getAnalyticsSummary()); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Serve frontend ────────────────────────────────────────
 app.get('*', (req, res) => {
+  if (!req.session?.user) {
+    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // ── Start ─────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 Cardio AI Sales Engine running on port ${PORT}`);
-  console.log(`   Health check: http://localhost:${PORT}/api/health`);
-  console.log(`   Frontend:     http://localhost:${PORT}\n`);
-});
+async function startServer() {
+  try {
+    await db.initDB();
+    app.listen(PORT, () => {
+      console.log(`\n🚀 Cardio AI Sales Engine running on port ${PORT}`);
+      console.log(`   Database:     ${db.USE_PG ? 'PostgreSQL ✅' : 'File storage ✅'}`);
+      console.log(`   Health check: http://localhost:${PORT}/api/health`);
+      console.log(`   Frontend:     http://localhost:${PORT}\n`);
+    });
+  } catch(e) {
+    console.error('❌ Failed to start server:', e.message);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 module.exports = app;
