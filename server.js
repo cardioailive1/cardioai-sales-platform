@@ -80,22 +80,25 @@ try {
   console.log('⚠️ Could not create session dir:', e.message);
 }
 
+// Trust Render's proxy for secure cookies
+app.set('trust proxy', 1);
+
 app.use(session({
   store: new FileStore({
     path: SESSION_DIR,
-    ttl: 86400, // 24 hours
+    ttl: 86400,
     retries: 1,
-    logFn: () => {} // suppress verbose logs
+    logFn: () => {}
   }),
   secret: process.env.SESSION_SECRET || crypto.randomBytes(64).toString('hex'),
   resave: false,
   saveUninitialized: false,
   name: 'cardioai.sid',
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: false,
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000
   }
 }));
 
@@ -118,8 +121,10 @@ function requireAuth(req, res, next) {
 
   // For all page routes — check auth
   if (!req.session?.user) {
+    console.log('No session for:', req.path, '— serving login');
     return res.sendFile(path.join(__dirname, 'public', 'login.html'));
   }
+  console.log('✅ Authenticated:', req.session.user.email, req.path);
   next();
 }
 
@@ -202,7 +207,10 @@ app.get('/api/auth/callback', async (req, res) => {
 
     req.session.user = { email, name, picture, signedInAt: new Date().toISOString() };
     console.log(`✅ User signed in: ${email}`);
-    res.redirect('/');
+    req.session.save((err) => {
+      if (err) console.error('Session save error:', err);
+      res.redirect('/');
+    });
   } catch(e) {
     console.error('Auth error:', e.message);
     res.redirect('/login.html?error=auth_failed');
