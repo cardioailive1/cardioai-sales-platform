@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in — Cardio AI Sales Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --navy:#125C9B;--deep-blue:#004FA7;--sky:#46BFFB;--light-blue:#80D4FF;
+  --coral:#FF4E5D;--sidebar-bg:#0a1628;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--sidebar-bg);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+
+.login-wrap{width:100%;max-width:420px}
+
+/* Brand header */
+.brand{text-align:center;margin-bottom:2rem}
+.brand-icon{width:72px;height:72px;border-radius:18px;background:var(--sky);display:inline-flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:1rem;box-shadow:0 0 40px rgba(70,191,251,.3)}
+.brand-name{font-size:24px;font-weight:800;color:#fff;letter-spacing:.06em;text-transform:uppercase}
+.brand-tagline{font-size:12px;color:var(--light-blue);letter-spacing:.1em;text-transform:uppercase;margin-top:4px;opacity:.8}
+
+/* Card */
+.card{background:#fff;border-radius:16px;padding:2rem;box-shadow:0 24px 64px rgba(0,0,0,.4)}
+.card-title{font-size:18px;font-weight:700;color:var(--navy);margin-bottom:6px;text-align:center}
+.card-sub{font-size:13px;color:#6b7280;text-align:center;margin-bottom:1.5rem;line-height:1.5}
+
+/* Google button */
+.google-btn{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:13px 20px;background:#fff;border:1.5px solid #dadce0;border-radius:10px;font-size:14px;font-weight:600;color:#1a1a1a;cursor:pointer;transition:all .15s;text-decoration:none}
+.google-btn:hover{background:#f8f9fa;border-color:#bbb;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.google-btn:active{transform:scale(.98)}
+.google-icon{width:20px;height:20px;flex-shrink:0}
+
+/* Divider */
+.divider{display:flex;align-items:center;gap:12px;margin:1.25rem 0}
+.divider-line{flex:1;height:1px;background:#e5e7eb}
+.divider-text{font-size:11px;color:#9ca3af;white-space:nowrap}
+
+/* Access info */
+.access-info{background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px 14px;font-size:12px;color:#0369a1;display:flex;align-items:flex-start;gap:8px;margin-bottom:1.25rem}
+.access-info svg{flex-shrink:0;margin-top:1px}
+
+/* Error banner */
+.error-banner{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 14px;font-size:12px;color:#991b1b;display:flex;align-items:flex-start;gap:8px;margin-bottom:1.25rem}
+.error-banner.hidden{display:none}
+
+/* Team members */
+.team-section{margin-top:1.25rem}
+.team-label{font-size:11px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;text-align:center}
+.team-avatars{display:flex;justify-content:center;gap:6px;flex-wrap:wrap}
+.team-avatar{width:36px;height:36px;border-radius:50%;background:rgba(70,191,251,.15);border:2px solid rgba(70,191,251,.3);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--navy);title:""}
+
+/* Footer */
+.footer{text-align:center;margin-top:1.5rem;font-size:11px;color:rgba(255,255,255,.3)}
+.footer a{color:var(--light-blue);text-decoration:none;opacity:.7}
+
+/* Loading state */
+.loading{display:none;text-align:center;padding:1rem}
+.loading.active{display:block}
+.spinner{width:32px;height:32px;border:3px solid rgba(70,191,251,.2);border-top-color:var(--sky);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading p{font-size:13px;color:#6b7280}
+
+/* Pulse dots */
+.dot-pulse{display:inline-flex;gap:3px;vertical-align:middle}
+.dot-pulse span{width:5px;height:5px;border-radius:50%;background:var(--sky);animation:pulse 1.2s ease-in-out infinite}
+.dot-pulse span:nth-child(2){animation-delay:.2s}
+.dot-pulse span:nth-child(3){animation-delay:.4s}
+@keyframes pulse{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+</style>
+</head>
+<body>
+
+<div class="login-wrap">
+  <div class="brand">
+    <div class="brand-icon">&#9829;</div>
+    <div class="brand-name">Cardio AI</div>
+    <div class="brand-tagline">Sales Engine</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Sign in to your workspace</div>
+    <div class="card-sub">Access is restricted to the Cardio AI team.<br>Sign in with your <strong>@cardioailive.com</strong> Google account.</div>
+
+    <div id="error-banner" class="error-banner hidden">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span id="error-text">Access denied.</span>
+    </div>
+
+    <div class="access-info">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span>Only <strong>@cardioailive.com</strong> email addresses can sign in. Contact Sampson to get access.</span>
+    </div>
+
+    <div id="sign-in-section">
+      <a href="/api/auth/google" class="google-btn" onclick="showLoading()">
+        <svg class="google-icon" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Continue with Google
+      </a>
+    </div>
+
+    <div id="loading-section" class="loading">
+      <div class="spinner"></div>
+      <p>Signing you in<div class="dot-pulse" style="display:inline-flex;margin-left:4px"><span></span><span></span><span></span></div></p>
+    </div>
+
+    <div class="team-section">
+      <div class="team-label">Cardio AI team</div>
+      <div class="team-avatars">
+        <div class="team-avatar" title="Sampson Kontomah — CEO">SK</div>
+        <div class="team-avatar" title="Galax Womack — CTO">GW</div>
+        <div class="team-avatar" title="Avi Patel — VP Engineering">AP</div>
+        <div class="team-avatar" title="Dr. Tamanna Nahar — Chief Medical Advisor">TN</div>
+        <div class="team-avatar" title="Julia Amegbe — Country Director Ghana">JA</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    &copy; 2025 Cardio AI Corp &nbsp;·&nbsp;
+    <a href="https://cardioailive.com">cardioailive.com</a>
+  </div>
+</div>
+
+<script>
+function showLoading() {
+  document.getElementById('sign-in-section').style.display = 'none';
+  document.getElementById('loading-section').classList.add('active');
+}
+
+// Parse URL error params
+const params = new URLSearchParams(window.location.search);
+const error = params.get('error');
+const email = params.get('email');
+
+if (error) {
+  const banner = document.getElementById('error-banner');
+  const text = document.getElementById('error-text');
+  banner.classList.remove('hidden');
+
+  const messages = {
+    unauthorized: `Access denied for <strong>${email || 'this account'}</strong>. Only @cardioailive.com emails are allowed. Contact Sampson to get access.`,
+    cancelled: 'Sign-in was cancelled. Please try again.',
+    auth_failed: 'Authentication failed. Please try again or contact Sampson.',
+    no_code: 'Something went wrong with Google. Please try again.'
+  };
+
+  text.innerHTML = messages[error] || 'Sign-in failed. Please try again.';
+}
+</script>
+</body>
+</html>
