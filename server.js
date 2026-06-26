@@ -33,6 +33,7 @@
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
 const crypto = require('crypto');
 
 const cors = require('cors');
@@ -1630,15 +1631,26 @@ app.set('trust proxy', 1);
 
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(64).toString('hex');
 
+// Use PostgreSQL session store if DATABASE_URL is set, else memory
+const sessionStore = process.env.DATABASE_URL
+  ? new pgSession({
+      conString: process.env.DATABASE_URL,
+      tableName: 'user_sessions',
+      createTableIfMissing: true,
+      ssl: { rejectUnauthorized: false }
+    })
+  : new session.MemoryStore();
+
 app.use(session({
+  store: sessionStore,
   secret: SESSION_SECRET,
-  resave: true,
+  resave: false,
   saveUninitialized: false,
   name: 'cardioai.sid',
   cookie: {
     secure: false,
-    httpOnly: false,
-    sameSite: false,
+    httpOnly: true,
+    sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000
   }
 }));
