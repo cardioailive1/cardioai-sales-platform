@@ -53,13 +53,23 @@ const db = require('./db');
 // The HTML/JS/CSS may live in /public or at the repo root depending on the
 // deploy. These helpers find a file in whichever location it actually exists,
 // so the app never 404s on index.html / login.html due to folder layout.
-const ASSET_DIRS = [path.join(__dirname, 'public'), __dirname];
+// Search several plausible locations so the app works regardless of whether
+// the frontend lives in /public, the repo root, or Render's working dir.
+const ASSET_DIRS = [
+  path.join(__dirname, 'public'),
+  __dirname,
+  path.join(process.cwd(), 'public'),
+  process.cwd(),
+];
 function resolveAsset(filename) {
   for (const dir of ASSET_DIRS) {
     const full = path.join(dir, filename);
     if (fs.existsSync(full)) return full;
   }
-  // Fall back to the public/ path (sendFile will then surface a clear error).
+  // Not found anywhere — log every path we checked so the deploy logs show
+  // exactly what's on disk, then fall back (sendFile surfaces a clear ENOENT).
+  console.error(`[asset] "${filename}" NOT FOUND. Checked:`);
+  for (const dir of ASSET_DIRS) console.error('   - ' + path.join(dir, filename));
   return path.join(__dirname, 'public', filename);
 }
 
@@ -753,6 +763,16 @@ async function startServer() {
       console.log(`   Database:     ${db.USE_PG ? 'PostgreSQL ✅' : 'File storage ✅'}`);
       console.log(`   Health check: http://localhost:${PORT}/api/health`);
       console.log(`   Frontend:     http://localhost:${PORT}\n`);
+      // ── Asset diagnostics: prints what actually exists on disk, so a
+      //    "file not found" is immediately explainable from the logs.
+      const listDir = (d) => { try { const f = fs.readdirSync(d); return f.length ? f.join(', ') : '(empty)'; } catch (e) { return '(missing: ' + e.code + ')'; } };
+      console.log('📂 __dirname        :', __dirname);
+      console.log('   └─ contents      :', listDir(__dirname));
+      console.log('📂 __dirname/public :', listDir(path.join(__dirname, 'public')));
+      console.log('📂 process.cwd()    :', process.cwd());
+      console.log('   └─ contents      :', listDir(process.cwd()));
+      console.log('📂 cwd/public       :', listDir(path.join(process.cwd(), 'public')));
+      console.log('🔎 index.html resolves to:', resolveAsset('index.html'), '\n');
     });
   } catch(e) {
     console.error('❌ Failed to start server:', e.message);
