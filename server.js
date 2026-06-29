@@ -49,6 +49,20 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const db = require('./db');
 
+// ── Frontend asset resolution (public/ OR repo root) ─────
+// The HTML/JS/CSS may live in /public or at the repo root depending on the
+// deploy. These helpers find a file in whichever location it actually exists,
+// so the app never 404s on index.html / login.html due to folder layout.
+const ASSET_DIRS = [path.join(__dirname, 'public'), __dirname];
+function resolveAsset(filename) {
+  for (const dir of ASSET_DIRS) {
+    const full = path.join(dir, filename);
+    if (fs.existsSync(full)) return full;
+  }
+  // Fall back to the public/ path (sendFile will then surface a clear error).
+  return path.join(__dirname, 'public', filename);
+}
+
 // ── Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
@@ -120,7 +134,7 @@ function requireAuth(req, res, next) {
 
   // For all page routes — check auth
   if (!req.session?.user) {
-    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+    return res.sendFile(resolveAsset('login.html'));
   }
   next();
 }
@@ -136,7 +150,15 @@ function isAllowedUser(email) {
 app.use(requireAuth);
 
 // ── Static files (served after auth check) ───────────────
+// Serve from public/ first, then the repo root, but never expose server-side
+// files (server.js, db.js, .env, package.json, etc.) from the root.
 app.use(express.static(path.join(__dirname, 'public')));
+const BLOCKED_ROOT = /(^|\/)(server\.js|db\.js|package(-lock)?\.json|\.env(\.example)?|README\.md|\.gitignore|seed\.json|data\.json)$/i;
+app.use((req, res, next) => {
+  if (BLOCKED_ROOT.test(req.path)) return next();
+  if (req.path.startsWith('/node_modules')) return next();
+  return express.static(__dirname)(req, res, next);
+});
 
 
 // ── Clients ─────────────────────────────────────────────
@@ -717,9 +739,9 @@ app.get('/api/analytics/summary', async (req, res) => {
 // ── Serve frontend ────────────────────────────────────────
 app.get('*', (req, res) => {
   if (!req.session?.user) {
-    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+    return res.sendFile(resolveAsset('login.html'));
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(resolveAsset('index.html'));
 });
 
 // ── Start ─────────────────────────────────────────────────
